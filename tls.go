@@ -204,11 +204,12 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	waitGroup := new(sync.WaitGroup)
 	waitGroup.Add(2)
 
+	var ClientHelloReadErr error
 	go func() {
 		for {
 			mutex.Lock()
-			hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
-			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.ServerNames[hs.clientHello.serverName] {
+			hs.clientHello, _, ClientHelloReadErr = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
+			if copying || ClientHelloReadErr != nil || hs.c.vers != VersionTLS13 || !config.ServerNames[hs.clientHello.serverName] {
 				break
 			}
 			var peerPub []byte
@@ -460,7 +461,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	conn.Close()
 	var failureReason string
 	if hs.clientHello == nil {
-		failureReason = "failed to read client hello"
+		failureReason = fmt.Sprintf("failed to read client hello: %v", ClientHelloReadErr)
 	} else if hs.c.vers != VersionTLS13 {
 		failureReason = fmt.Sprintf("unsupported TLS version: %x", hs.c.vers)
 	} else if !config.ServerNames[hs.clientHello.serverName] {
