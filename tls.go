@@ -56,9 +56,17 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-type CloseWriteConn interface {
-	net.Conn
+type canCloseWrite interface {
 	CloseWrite() error
+}
+
+func tryCloseWrite(c net.Conn, forceCloseOnFail bool) error {
+	if conn, ok := c.(canCloseWrite); ok {
+		return conn.CloseWrite()
+	} else if forceCloseOnFail {
+		return c.Close()
+	}
+	return nil
 }
 
 type MirrorConn struct {
@@ -183,7 +191,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	if pc, ok := conn.(*proxyproto.Conn); ok {
 		raw = pc.Raw() // for TCP splicing in io.Copy()
 	}
-	underlying := raw.(CloseWriteConn) // *net.TCPConn or *net.UnixConn
+	underlying := raw // *net.TCPConn or *net.UnixConn or sth strange (from tcp mask)
 
 	mutex := new(sync.Mutex)
 
@@ -275,10 +283,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			_, err := io.Copy(target, NewRatelimitedConn(underlying, &config.LimitFallbackUpload))
 			// close target writer when received FIN (err==nil)
 			if err == nil {
-				targetWriterCloser, ok := target.(CloseWriteConn)
-				if ok {
-					targetWriterCloser.CloseWrite()
-				}
+				tryCloseWrite(target, false)
 			} else {
 				// Close target when encountering RST (or any other errors)
 				target.Close()
@@ -443,7 +448,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			// Here is bidirectional direct forwarding:
 			// client ---underlying--- server ---target--- dest
 			// Call `underlying.CloseWrite()` once `io.Copy()` returned
-			underlying.CloseWrite()
+			tryCloseWrite(underlying, true)
 		}
 		waitGroup.Done()
 	}()
