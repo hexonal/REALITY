@@ -35,7 +35,17 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 							GlobalPostHandshakeRecordsLens.Store(key, []int{})
 						}
 					}()
-					target, err := net.Dial(config.Type, config.Dest)
+					// Was a bare net.Dial (no timeout) - Server()'s real-client
+					// handshake path (tls.go) blocks in a loop, polling every
+					// 5s, until this key resolves in GlobalPostHandshakeRecordsLens
+					// (the deferred cleanup two lines up guarantees it
+					// eventually does, success or failure). A hung dial to a
+					// transiently blackholed disguise dest used to mean any
+					// real client connecting in that window could wait up to
+					// the OS's default TCP connect retry ceiling (~127s) for
+					// its own handshake to complete. Bounding this dial
+					// bounds that stall to a couple of poll cycles instead.
+					target, err := net.DialTimeout(config.Type, config.Dest, 8*time.Second)
 					if err != nil {
 						return
 					}
@@ -78,7 +88,7 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					// best-effort, no caller to report to, must not crash
 					// the process.
 					defer func() { recover() }()
-					target, err := net.Dial(config.Type, config.Dest)
+					target, err := net.DialTimeout(config.Type, config.Dest, 8*time.Second)
 					if err != nil {
 						return
 					}
