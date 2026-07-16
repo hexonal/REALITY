@@ -24,6 +24,11 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 			key := config.Dest + " " + sni + " " + strconv.Itoa(alpn)
 			if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(key, false); !loaded {
 				go func() {
+					// Best-effort background calibration probe against the
+					// disguise dest — any panic here (this one or an unknown
+					// future one) must not take down the whole process, since
+					// this goroutine has no caller to propagate an error to.
+					defer func() { recover() }()
 					defer func() {
 						val, _ := GlobalPostHandshakeRecordsLens.Load(key)
 						if _, ok := val.(bool); ok {
@@ -64,6 +69,10 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					io.Copy(io.Discard, uConn)
 				}()
 				go func() {
+					// Same reasoning as the sibling probe goroutine above:
+					// best-effort, no caller to report to, must not crash
+					// the process.
+					defer func() { recover() }()
 					target, err := net.Dial(config.Type, config.Dest)
 					if err != nil {
 						return
@@ -124,6 +133,17 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 	for {
 		if len(data) >= 5 && bytes.Equal(data[:3], []byte{23, 3, 3}) {
 			length := int(binary.BigEndian.Uint16(data[3:5])) + 5
+			// A truncated final record (network cut/RST/read-deadline firing
+			// mid-record against the disguise dest) can legitimately report a
+			// length longer than what actually arrived — io.ReadAll's error
+			// is discarded above, so "data" may be a partial read. Without
+			// this check, data[length:] panics ("slice bounds out of range"),
+			// which — since this runs unrecovered in NewListener's
+			// background goroutine — takes down the whole process on every
+			// REALITY inbound, not just this probe.
+			if length > len(data) {
+				break
+			}
 			postHandshakeRecordsLens = append(postHandshakeRecordsLens, length)
 			data = data[length:]
 		} else {
