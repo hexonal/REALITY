@@ -39,6 +39,11 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					if err != nil {
 						return
 					}
+					// Never closed before this fix - a bounded (one per
+					// unique dest/SNI/alpn key, gated by the LoadOrStore
+					// above) but real leak of a goroutine+socket per REALITY
+					// listener startup.
+					defer target.Close()
 					if config.Xver == 1 || config.Xver == 2 {
 						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
 							return
@@ -77,6 +82,8 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					if err != nil {
 						return
 					}
+					// Same leak as the sibling probe goroutine above.
+					defer target.Close()
 					if config.Xver == 1 || config.Xver == 2 {
 						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
 							return
@@ -165,11 +172,24 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 	if len(b) >= 3 && bytes.Equal(b[:3], []byte{20, 3, 3}) {
 		var hasAlert atomic.Bool
 		go func() {
+			// Used to assign into `err` - Write's own named return value -
+			// racing unsynchronized against every `return c.Conn.Write(b)`
+			// below that also assigns it (go test -race flags this). Use a
+			// local instead; nothing here needs to surface a read error to
+			// the caller anyway.
+			//
+			// hasAlert is deliberately set on ANY read outcome (a genuine
+			// TLS alert byte, but also EOF/RST/any other error) - kept as-is
+			// on purpose: this is a conservative disguise-site probe, and
+			// treating "the site disconnected after our garbage CCS spam,
+			// for whatever reason" as "assume it noticed" is the safer
+			// failure mode for a DPI-camouflage heuristic than assuming
+			// tolerance it can't actually confirm.
 			defer hasAlert.Store(true)
 			buf := make([]byte, 512)
 			for {
-				_, err = c.Conn.Read(buf)
-				if err != nil {
+				_, readErr := c.Conn.Read(buf)
+				if readErr != nil {
 					return
 				}
 				if buf[0] == 0x15 {
